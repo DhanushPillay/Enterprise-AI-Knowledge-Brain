@@ -20,8 +20,10 @@ docker run -d --name neo4j -p 7474:7474 -p 7687:7687 \
 # Set your Groq API key (free at console.groq.com)
 export GROQ_API_KEY="your-groq-api-key"
 
-# Run it
-streamlit run src/app.py
+# Run the web interface
+cd cortexa
+npm install
+npm run dev
 ```
 
 ## How It Works
@@ -73,8 +75,6 @@ Full details: [docs/agents.md](docs/agents.md), [docs/knowledge-graph.md](docs/k
 
 | What | Where |
 |------|-------|
-| AI assistant instructions | [AGENTS.md](AGENTS.md) |
-| Coding standards | [CONVENTIONS.md](CONVENTIONS.md) |
 | System architecture | [docs/architecture.md](docs/architecture.md) |
 | Agent specs | [docs/agents.md](docs/agents.md) |
 | Graph schema | [docs/knowledge-graph.md](docs/knowledge-graph.md) |
@@ -96,7 +96,7 @@ Everything here is free. No paid APIs, no subscriptions.
 | Knowledge graph | Neo4j Community | Free, no node limits |
 | GNN | PyTorch Geometric | Industry standard |
 | Agent orchestration | LangGraph | By LangChain team |
-| Frontend | Streamlit | Fast to build |
+| Frontend | Next.js & React | Modern, interactive web UI |
 
 ## Project Scope
 
