@@ -1,28 +1,30 @@
 "use client";
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { MagneticButton } from "@/components/ui/magnetic-button";
-import { Upload, ArrowUp } from "lucide-react";
+import { ArrowUp, Brain, Loader2, ChevronDown, Shield, Database } from "lucide-react";
+import { useChatStore, type Message } from "@/store/chat-store";
 
 export default function PublicChatbot() {
-  const [messages, setMessages] = useState<{id: string, text: string, sender: 'user'|'ai'}[]>([]);
+  const { messages, isLoading, sendMessage } = useChatStore();
   const [input, setInput] = useState("");
+  const [expandedSources, setExpandedSources] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, isLoading]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
-    
-    setMessages(prev => [...prev, { id: Date.now().toString(), text: input, sender: 'user' }]);
+    if (!input.trim() || isLoading) return;
+
+    const query = input;
     setInput("");
-    
-    // Simulate AI response
-    setTimeout(() => {
-      setMessages(prev => [...prev, { 
-        id: (Date.now() + 1).toString(), 
-        text: "I am analyzing your organizational data. This is a bespoke, human-crafted interface.", 
-        sender: 'ai' 
-      }]);
-    }, 1500);
+    await sendMessage(query);
   };
 
   return (
@@ -51,11 +53,14 @@ export default function PublicChatbot() {
         )}
       </AnimatePresence>
 
-      {/* Main Chat Container - Centered */}
+      {/* Main Chat Container */}
       <div className="flex flex-col flex-1 w-full max-w-3xl mx-auto relative h-full min-h-0 px-4">
         
         {/* Chat Area */}
-        <div className="flex-1 overflow-y-auto pt-8 pb-32 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto pt-8 pb-32 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
+        >
           <AnimatePresence>
             {messages.length === 0 && (
               <motion.div 
@@ -77,7 +82,7 @@ export default function PublicChatbot() {
                     "Explain our standard deployment architecture"
                   ].map((suggestion, i) => (
                     <button 
-                      key={i}
+                      key={`suggestion-${i}`}
                       onClick={() => setInput(suggestion)}
                       className="hoverable text-left px-6 py-4 bg-white/50 rounded-2xl border border-black/5 hover:bg-white hover:border-black/10 transition-all text-sm text-[#555] font-sans"
                     >
@@ -94,16 +99,110 @@ export default function PublicChatbot() {
                   key={msg.id}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`max-w-[80%] ${msg.sender === 'user' ? 'self-end' : 'self-start'}`}
+                  className={`max-w-[85%] ${msg.role === 'user' ? 'self-end' : 'self-start'}`}
                 >
-                  <div className={`font-mono text-[9px] uppercase tracking-widest mb-2 ${msg.sender === 'user' ? 'text-right text-[#999]' : 'text-left text-[#333]'}`}>
-                    {msg.sender === 'user' ? 'You' : 'Cortexa'}
+                  {/* Sender label */}
+                  <div className={`font-mono text-[9px] uppercase tracking-widest mb-2 flex items-center gap-2 ${msg.role === 'user' ? 'justify-end text-[#999]' : 'text-[#333]'}`}>
+                    {msg.role === 'assistant' && <Brain className="w-3 h-3" />}
+                    {msg.role === 'user' ? 'You' : 'Cortexa'}
+                    {msg.is_safe === false && (
+                      <span className="text-red-500 flex items-center gap-1">
+                        <Shield className="w-3 h-3" /> BLOCKED
+                      </span>
+                    )}
                   </div>
-                  <div className={`text-xl leading-relaxed ${msg.sender === 'user' ? 'text-[#111] text-right' : 'text-[#444] font-heading text-2xl'}`}>
-                    {msg.text}
+
+                  {/* Message body */}
+                  <div className={`text-lg leading-relaxed whitespace-pre-wrap ${msg.role === 'user' ? 'text-[#111] text-right' : 'text-[#444]'}`}>
+                    {msg.content}
                   </div>
+
+                  {/* Reasoning & Sources (assistant messages only) */}
+                  {msg.role === 'assistant' && (msg.reasoning?.length || msg.sources?.length) && (
+                    <div className="mt-3">
+                      <button
+                        onClick={() => setExpandedSources(expandedSources === msg.id ? null : msg.id)}
+                        className="flex items-center gap-2 text-xs font-mono text-[#999] hover:text-[#555] transition-colors"
+                      >
+                        <Database className="w-3 h-3" />
+                        {msg.sources?.length || 0} sources · {msg.reasoning?.length || 0} steps
+                        <ChevronDown className={`w-3 h-3 transition-transform ${expandedSources === msg.id ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      <AnimatePresence>
+                        {expandedSources === msg.id && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden"
+                          >
+                            {/* Reasoning trace */}
+                            {msg.reasoning && msg.reasoning.length > 0 && (
+                              <div className="mt-2 p-3 bg-black/[0.02] rounded-xl border border-black/5">
+                                <div className="font-mono text-[9px] uppercase tracking-widest text-[#999] mb-2">Reasoning</div>
+                                <ol className="space-y-1">
+                                  {msg.reasoning.map((step, i) => (
+                                    <li key={`reason-${msg.id}-${i}`} className="text-xs text-[#666] font-mono flex gap-2">
+                                      <span className="text-[#aaa] shrink-0">{i + 1}.</span>
+                                      {step}
+                                    </li>
+                                  ))}
+                                </ol>
+                              </div>
+                            )}
+
+                            {/* Sources */}
+                            {msg.sources && msg.sources.length > 0 && (
+                              <div className="mt-2 space-y-2">
+                                {msg.sources.map((source, i) => (
+                                  <div
+                                    key={`source-${msg.id}-${i}`}
+                                    className="p-3 bg-black/[0.02] rounded-xl border border-black/5"
+                                  >
+                                    <div className="flex justify-between items-center mb-1">
+                                      <span className="text-xs font-mono font-medium text-[#555]">
+                                        {source.name}
+                                      </span>
+                                      <span className={`text-[9px] font-mono uppercase px-2 py-0.5 rounded-full ${
+                                        source.type === 'graph'
+                                          ? 'bg-emerald-100 text-emerald-700'
+                                          : 'bg-blue-100 text-blue-700'
+                                      }`}>
+                                        {source.type}
+                                      </span>
+                                    </div>
+                                    <p className="text-xs text-[#888] line-clamp-2">
+                                      {source.snippet}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
                 </motion.div>
               ))}
+
+              {/* Loading indicator */}
+              {isLoading && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="self-start max-w-[80%]"
+                >
+                  <div className="font-mono text-[9px] uppercase tracking-widest mb-2 text-[#333] flex items-center gap-2">
+                    <Brain className="w-3 h-3" /> Cortexa
+                  </div>
+                  <div className="flex items-center gap-3 text-[#888]">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span className="text-sm font-mono">Searching knowledge graph...</span>
+                  </div>
+                </motion.div>
+              )}
             </div>
           </AnimatePresence>
         </div>
@@ -118,6 +217,7 @@ export default function PublicChatbot() {
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="What do you want to know?"
                 className="w-full bg-transparent border-none outline-none font-sans text-lg py-2 px-3 placeholder:text-[#aaa] focus:ring-0"
+                disabled={isLoading}
               />
               
               <div className="flex justify-between items-center mt-2">
@@ -128,13 +228,13 @@ export default function PublicChatbot() {
                   <button type="button" className="p-2 text-[#666] hover:text-black hover:bg-black/5 rounded-full transition-colors" title="Search Web">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
                   </button>
-                  <button type="button" className="p-2 text-[#666] hover:text-black hover:bg-black/5 rounded-full transition-colors" title="Voice Input">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
-                  </button>
                 </div>
                 
-                <MagneticButton type="submit" className="!p-2.5 !bg-black text-white hover:!bg-black/80 flex-shrink-0">
-                  <ArrowUp className="w-5 h-5" />
+                <MagneticButton
+                  type="submit"
+                  className={`!p-2.5 flex-shrink-0 ${isLoading ? '!bg-gray-400' : '!bg-black hover:!bg-black/80'} text-white`}
+                >
+                  {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ArrowUp className="w-5 h-5" />}
                 </MagneticButton>
               </div>
 
