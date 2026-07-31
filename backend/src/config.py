@@ -24,7 +24,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ---------------------------------------------------------------------------
 # Project root: two levels up from this file (src/config.py -> project root)
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class GroqModelConfig:
@@ -59,10 +59,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Groq API -----------------------------------------------------------
-    groq_api_key: str = Field(
+    # --- Groq API Keys (3 separate keys for pipeline isolation) ---------------
+    groq_api_key_query: str = Field(
         ...,
-        description="Groq API key (starts with gsk_). Free at console.groq.com",
+        description="Groq key for user-facing Q&A (Llama 3.3 70B).",
+    )
+    groq_api_key_extraction: str = Field(
+        ...,
+        description="Groq key for entity extraction during ingestion (Llama 3.1 8B).",
+    )
+    groq_api_key_security: str = Field(
+        ...,
+        description="Groq key for prompt injection detection (Llama 3.1 8B).",
     )
     groq_model_query: str = Field(
         default=GroqModelConfig.LLAMA_70B,
@@ -158,22 +166,40 @@ class Settings(BaseSettings):
     )
 
     # --- App / Logging -------------------------------------------------------
-    app_host: str = Field(default="0.0.0.0", description="Streamlit host.")
-    app_port: int = Field(default=8501, description="Streamlit port.")
+    app_host: str = Field(default="0.0.0.0", description="API host.")
+    app_port: int = Field(default=8000, description="API port.")
     log_level: str = Field(default="INFO", description="Logging level.")
 
     # --- Validators ----------------------------------------------------------
 
-    @field_validator("groq_api_key")
+    @field_validator("groq_api_key_query", "groq_api_key_extraction", "groq_api_key_security")
     @classmethod
     def validate_groq_key(cls, value: str) -> str:
         """Groq keys start with 'gsk_'. Catch typos early."""
         if not value.startswith("gsk_"):
             raise ValueError(
-                "GROQ_API_KEY must start with 'gsk_'. "
-                "Get a free key at https://console.groq.com"
+                "Groq API keys must start with 'gsk_'. "
+                "Get free keys at https://console.groq.com"
             )
         return value
+
+    def get_groq_key_for_pipeline(self, pipeline: str) -> str:
+        """Return the correct API key for a given pipeline.
+
+        Args:
+            pipeline: One of 'query', 'extraction', 'security'.
+
+        Returns:
+            The API key string for the requested pipeline.
+        """
+        key_map = {
+            "query": self.groq_api_key_query,
+            "extraction": self.groq_api_key_extraction,
+            "security": self.groq_api_key_security,
+        }
+        if pipeline not in key_map:
+            raise ValueError(f"Unknown pipeline '{pipeline}'. Use: {list(key_map.keys())}")
+        return key_map[pipeline]
 
     @field_validator("log_level")
     @classmethod
@@ -283,9 +309,9 @@ def _verify() -> None:
         sys.exit(1)
 
     # 2. Groq API key format
-    results["Groq API Key"] = (
-        f"✅ Set (starts with gsk_...{cfg.groq_api_key[-4:]})"
-    )
+    results["Groq Key (Query)"] = f"✅ Set (...{cfg.groq_api_key_query[-4:]})"
+    results["Groq Key (Extract)"] = f"✅ Set (...{cfg.groq_api_key_extraction[-4:]})"
+    results["Groq Key (Security)"] = f"✅ Set (...{cfg.groq_api_key_security[-4:]})"
 
     # 3. Neo4j connection
     try:
@@ -335,7 +361,7 @@ def _verify() -> None:
     try:
         from groq import Groq
 
-        client = Groq(api_key=cfg.groq_api_key)
+        client = Groq(api_key=cfg.groq_api_key_query)
         response = client.chat.completions.create(
             model=cfg.groq_model_extraction,
             messages=[{"role": "user", "content": "Reply with OK"}],

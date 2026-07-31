@@ -1,176 +1,281 @@
-"""Groq client wrapper with strict rate-limiting and exponential backoff.
+"""Rate-limit-aware Groq LLM client with pipeline key isolation.
 
-All agents MUST use this client instead of calling the Groq SDK directly.
-This ensures we don't hit 429 Rate Limit errors on the free tier.
+Every LLM call in this project goes through this module.
+Each pipeline (query, extraction, security) uses its own API key
+so they never starve each other under rate limits.
+
+Usage:
+    from backend.src.llm.groq_client import get_groq_client
+
+    client = get_groq_client("query")
+    answer = await client.generate("What is Neo4j?")
 """
 
 import asyncio
+import json
 import logging
 import time
-from datetime import date
-from typing import Any
+from typing import Any, Optional
 
-from groq import AsyncGroq, GroqError, RateLimitError
-from groq.types.chat import ChatCompletion
-
-from src.config import get_settings
+from groq import AsyncGroq, RateLimitError as GroqRateLimitError
 
 logger = logging.getLogger(__name__)
 
 
 class GroqDailyLimitError(Exception):
-    """Raised when the daily request limit is exceeded."""
+    """Raised when daily request limit is exhausted."""
 
 
 class RateLimiter:
-    """Token bucket rate limiter for a specific Groq model.
+    """Token-bucket rate limiter scoped to a single API key.
 
-    Tracks RPM (Requests Per Minute), TPM (Tokens Per Minute),
-    and RPD (Requests Per Day).
+    Tracks requests-per-minute, tokens-per-minute, and requests-per-day
+    using a sliding window. Blocks the caller with asyncio.sleep
+    instead of raising immediately.
     """
 
-    def __init__(self, model_id: str, rpm: int, tpm: int, rpd: int):
-        self.model_id = model_id
+    def __init__(self, rpm: int = 30, tpm: int = 6000, rpd: int = 1000) -> None:
         self.rpm = rpm
         self.tpm = tpm
         self.rpd = rpd
-
-        # Sliding window for RPM tracking
         self.request_times: list[float] = []
-
-        # Token and daily tracking
         self.token_count: int = 0
         self.daily_count: int = 0
-        self.last_reset_day: str = date.today().isoformat()
-
         self._lock = asyncio.Lock()
 
     async def acquire(self, estimated_tokens: int = 500) -> None:
-        """Wait until we can make a request without hitting limits."""
+        """Wait until a request slot is available."""
         async with self._lock:
             now = time.time()
-            today = date.today().isoformat()
 
-            # Reset daily counts if it's a new day
-            if today != self.last_reset_day:
-                self.daily_count = 0
-                self.last_reset_day = today
+            # Sliding window: drop requests older than 60s
+            self.request_times = [
+                t for t in self.request_times if now - t < 60
+            ]
 
-            # Check daily limit first (hard stop)
-            if self.daily_count >= self.rpd:
-                raise GroqDailyLimitError(
-                    f"Daily limit ({self.rpd}) exceeded for {self.model_id}"
-                )
-
-            # Clean up old request times (requests older than 60s)
-            self.request_times = [t for t in self.request_times if now - t < 60]
-
-            # 1. Enforce Requests Per Minute (RPM)
+            # Wait if at RPM ceiling
             if len(self.request_times) >= self.rpm:
-                oldest_request = self.request_times[0]
-                wait_time = 60.0 - (now - oldest_request)
+                wait_time = 60 - (now - self.request_times[0])
                 if wait_time > 0:
-                    logger.debug("RPM limit reached. Waiting %.2fs", wait_time)
+                    logger.warning("RPM limit hit, waiting %.1fs", wait_time)
                     await asyncio.sleep(wait_time)
-                    now = time.time()  # update time after sleep
 
-            # 2. Enforce Tokens Per Minute (TPM)
-            # If this single request would push us over, we must wait
+            # Wait if at TPM ceiling
             if self.token_count + estimated_tokens > self.tpm:
-                # We wait a short burst and reset token count.
-                # In a perfect token bucket, we'd wait for tokens to drip back,
-                # but a simple 1s pause usually clears Groq's sliding window
-                # if we are pacing ourselves. To be safe, we wait a bit longer.
-                logger.debug("TPM limit reached. Pacing requests.")
-                await asyncio.sleep(2.0)
+                logger.warning("TPM limit hit, waiting 1s")
+                await asyncio.sleep(1)
                 self.token_count = 0
 
-            # Record this request
+            # Hard stop on daily limit
+            if self.daily_count >= self.rpd:
+                raise GroqDailyLimitError(
+                    f"Daily request limit ({self.rpd}) exhausted. "
+                    "Try again tomorrow or use a different API key."
+                )
+
             self.request_times.append(time.time())
             self.token_count += estimated_tokens
             self.daily_count += 1
 
 
-class RateLimitedGroq:
-    """Wrapper around AsyncGroq that enforces rate limits per model."""
+class GroqClient:
+    """Async Groq client for a single pipeline.
 
-    def __init__(self, api_key: str | None = None):
-        self.settings = get_settings()
-        self.client = AsyncGroq(api_key=api_key or self.settings.groq_api_key)
+    Each instance holds one API key and its own rate limiter,
+    ensuring pipeline isolation.
 
-        # One rate limiter per model, since limits are per-model
-        self._limiters: dict[str, RateLimiter] = {}
+    Args:
+        api_key: The Groq API key for this pipeline.
+        pipeline_name: Human-readable name for logging ('query', 'extraction', 'security').
+        default_model: Default model ID to use if none specified.
+        rpm: Requests per minute limit.
+        tpm: Tokens per minute limit.
+        rpd: Requests per day limit.
+        max_retries: Number of retries on 429 errors.
+        base_backoff: Base seconds for exponential backoff.
+    """
 
-    def _get_limiter(self, model: str) -> RateLimiter:
-        """Get or create the rate limiter for a specific model."""
-        if model not in self._limiters:
-            limits = self.settings.get_model_limits(model)
-            self._limiters[model] = RateLimiter(
-                model_id=model,
-                rpm=limits["rpm"],
-                tpm=limits["tpm"],
-                rpd=limits["rpd"],
-            )
-        return self._limiters[model]
-
-    def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
-        """Roughly estimate token count: 1 token ~= 4 chars."""
-        text_length = sum(len(str(m.get("content", ""))) for m in messages)
-        # Add some padding for the response (assuming we generate max 1024 tokens)
-        return (text_length // 4) + 1024
+    def __init__(
+        self,
+        api_key: str,
+        pipeline_name: str,
+        default_model: str = "llama-3.1-8b-instant",
+        rpm: int = 30,
+        tpm: int = 6000,
+        rpd: int = 1000,
+        max_retries: int = 3,
+        base_backoff: float = 2.0,
+    ) -> None:
+        self.pipeline_name = pipeline_name
+        self.default_model = default_model
+        self.max_retries = max_retries
+        self.base_backoff = base_backoff
+        self._client = AsyncGroq(api_key=api_key)
+        self._rate_limiter = RateLimiter(rpm=rpm, tpm=tpm, rpd=rpd)
+        self._usage_requests: int = 0
+        self._usage_tokens: int = 0
 
     async def generate(
         self,
-        messages: list[dict[str, Any]],
-        model: str,
+        prompt: str,
+        model: Optional[str] = None,
         temperature: float = 0.1,
-        max_tokens: int = 1024,
-        response_format: dict[str, str] | None = None,
-    ) -> ChatCompletion:
-        """Generate a response with rate limits and exponential backoff."""
-        limiter = self._get_limiter(model)
-        estimated_tokens = self._estimate_tokens(messages)
+        max_tokens: int = 2048,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """Generate a text completion with automatic rate limiting and retry.
 
-        max_retries = self.settings.groq_max_retries
-        base_backoff = self.settings.groq_base_backoff_seconds
+        Args:
+            prompt: The user message.
+            model: Groq model ID. Falls back to self.default_model.
+            temperature: Sampling temperature (0 = deterministic).
+            max_tokens: Maximum tokens in the response.
+            system_prompt: Optional system message prepended to the conversation.
 
-        for attempt in range(max_retries):
+        Returns:
+            The generated text string.
+        """
+        model = model or self.default_model
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        for attempt in range(self.max_retries):
             try:
-                # Wait for capacity in the token bucket
-                await limiter.acquire(estimated_tokens)
+                estimated_tokens = len(prompt) // 4
+                await self._rate_limiter.acquire(estimated_tokens)
 
-                # Make the actual API call
-                kwargs: dict[str, Any] = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                if response_format:
-                    kwargs["response_format"] = response_format
-
-                response = await self.client.chat.completions.create(**kwargs)
-                return response
-
-            except RateLimitError as e:
-                if attempt == max_retries - 1:
-                    logger.error("Max retries reached on RateLimitError.")
-                    raise
-
-                # Exponential backoff: 2s, 4s, 8s...
-                wait_time = base_backoff * (2 ** attempt)
-                logger.warning(
-                    "Groq RateLimitError (429). Retrying in %.1fs (attempt %d/%d). %s",
-                    wait_time,
-                    attempt + 1,
-                    max_retries,
-                    str(e),
+                response = await self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
-                await asyncio.sleep(wait_time)
 
-            except GroqError as e:
-                # Other API errors (auth, bad request) fail immediately
-                logger.error("Groq API Error: %s", str(e))
-                raise
+                result = response.choices[0].message.content or ""
+                tokens_used = response.usage.total_tokens if response.usage else estimated_tokens
+                self._usage_requests += 1
+                self._usage_tokens += tokens_used
 
-        raise RuntimeError("Unreachable")
+                logger.debug(
+                    "[%s] Generated %d tokens with %s",
+                    self.pipeline_name, tokens_used, model,
+                )
+                return result
+
+            except GroqRateLimitError:
+                if attempt == self.max_retries - 1:
+                    raise
+                wait = self.base_backoff * (2 ** attempt)
+                logger.warning(
+                    "[%s] Rate limited, retry %d/%d in %.1fs",
+                    self.pipeline_name, attempt + 1, self.max_retries, wait,
+                )
+                await asyncio.sleep(wait)
+
+        # Should never reach here, but satisfy type checker
+        raise RuntimeError("Exhausted retries without success or exception")
+
+    async def generate_structured(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        system_prompt: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Generate a JSON-structured response.
+
+        Wraps generate() and parses the result as JSON.
+        If the LLM returns markdown-fenced JSON, strips the fences first.
+
+        Returns:
+            Parsed dictionary from the LLM's JSON output.
+        """
+        raw = await self.generate(
+            prompt=prompt,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+        )
+
+        # Strip markdown code fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            # Remove first line (```json) and last line (```)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            cleaned = "\n".join(lines)
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            logger.error(
+                "[%s] Failed to parse LLM JSON output: %s\nRaw: %s",
+                self.pipeline_name, e, raw[:500],
+            )
+            raise ValueError(f"LLM returned invalid JSON: {e}") from e
+
+    def get_usage(self) -> dict[str, int]:
+        """Return cumulative usage stats for this pipeline."""
+        return {
+            "pipeline": self.pipeline_name,
+            "total_requests": self._usage_requests,
+            "total_tokens": self._usage_tokens,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Factory: creates pipeline-specific clients from Settings
+# ---------------------------------------------------------------------------
+_clients: dict[str, GroqClient] = {}
+
+
+def get_groq_client(pipeline: str) -> GroqClient:
+    """Get or create a GroqClient for a specific pipeline.
+
+    Args:
+        pipeline: One of 'query', 'extraction', 'security'.
+
+    Returns:
+        A GroqClient instance with the correct API key and rate limits.
+    """
+    if pipeline in _clients:
+        return _clients[pipeline]
+
+    from backend.src.config import get_settings, GroqModelConfig
+
+    cfg = get_settings()
+    api_key = cfg.get_groq_key_for_pipeline(pipeline)
+
+    # Choose default model and limits per pipeline
+    pipeline_config = {
+        "query": {
+            "model": GroqModelConfig.LLAMA_70B,
+            "limits": GroqModelConfig.LIMITS[GroqModelConfig.LLAMA_70B],
+        },
+        "extraction": {
+            "model": GroqModelConfig.LLAMA_8B,
+            "limits": GroqModelConfig.LIMITS[GroqModelConfig.LLAMA_8B],
+        },
+        "security": {
+            "model": GroqModelConfig.LLAMA_8B,
+            "limits": GroqModelConfig.LIMITS[GroqModelConfig.LLAMA_8B],
+        },
+    }
+
+    pcfg = pipeline_config[pipeline]
+    client = GroqClient(
+        api_key=api_key,
+        pipeline_name=pipeline,
+        default_model=pcfg["model"],
+        rpm=pcfg["limits"]["rpm"],
+        tpm=pcfg["limits"]["tpm"],
+        rpd=pcfg["limits"]["rpd"],
+        max_retries=cfg.groq_max_retries,
+        base_backoff=cfg.groq_base_backoff_seconds,
+    )
+    _clients[pipeline] = client
+    return client
