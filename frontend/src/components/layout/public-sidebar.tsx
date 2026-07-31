@@ -1,7 +1,7 @@
 "use client";
 
 import { MessageSquare, Settings, Plus, LayoutDashboard } from "lucide-react";
-import { MagneticButton } from "./magnetic-button";
+import { MagneticButton } from "@/components/ui/magnetic-button";
 import Link from "next/link";
 
 export const PublicSidebar = () => {
