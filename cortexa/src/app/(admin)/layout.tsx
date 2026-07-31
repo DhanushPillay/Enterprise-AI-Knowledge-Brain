@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Lora, Inter, Geist_Mono } from "next/font/google";
-import { AppSidebar } from "@/components/app-sidebar";
-import { ChatStrip } from "@/components/chat-strip";
+import { AppSidebar } from "@/components/layout/app-sidebar";
+import { ChatStrip } from "@/features/chat/chat-strip";
 import "../globals.css";
 
 const lora = Lora({ variable: "--font-heading", subsets: ["latin"] });

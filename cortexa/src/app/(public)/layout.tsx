@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Lora, Inter, Geist_Mono } from "next/font/google";
 import "../globals.css";
 import { CustomCursor } from "@/components/ui/custom-cursor";
-import { PublicSidebar } from "@/components/ui/public-sidebar";
+import { PublicSidebar } from "@/components/layout/public-sidebar";
 
 const lora = Lora({ variable: "--font-heading", subsets: ["latin"] });
 const inter = Inter({ variable: "--font-sans", subsets: ["latin"] });
