@@ -1,0 +1,36 @@
+# Enterprise AI Knowledge Brain - Dependencies
+# All free. No paid APIs, no subscriptions.
+
+# === LLM ===
+groq>=1.6.0
+
+# === Embeddings (local, no API calls) ===
+sentence-transformers>=3.0.0
+
+# === Vector Store ===
+chromadb>=1.5.0
+
+# === Graph Database ===
+neo4j>=5.25.0
+
+# === Agent Orchestration ===
+langgraph>=1.2.0
+langchain-core>=0.3.0
+
+# === Document Processing ===
+PyPDF2>=3.0.0
+tiktoken>=0.7.0
+
+# === Frontend ===
+streamlit>=1.38.0
+
+# === Config & Utilities ===
+python-dotenv>=1.0.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+
+# === Dev / Testing ===
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+ruff>=0.6.0
+mypy>=1.11.0
