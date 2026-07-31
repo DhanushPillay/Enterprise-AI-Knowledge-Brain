@@ -1,0 +1,39 @@
+# llms.txt — Machine-readable documentation index
+# Format: <path> — <purpose>
+# This file helps AI agents discover project documentation.
+
+# Root-level docs
+README.md — Project overview, quickstart, architecture diagram
+AGENTS.md — AI coding assistant instructions and conventions
+CLAUDE.md — Claude Code entry point (points to AGENTS.md)
+CONVENTIONS.md — Coding standards, naming, testing rules
+
+# Project scope
+docs/project-scope.md — Full project description, data sources, capabilities, industry use cases
+
+# Architecture docs
+docs/architecture.md — Full system architecture, component diagrams, data flow
+docs/agents.md — Agent specifications (inputs, outputs, tools, boundaries)
+docs/knowledge-graph.md — Neo4j schema, entity types, relationship types, Cypher queries
+docs/pipeline.md — End-to-end data flow (ingestion → extraction → graph → retrieval → query)
+docs/models.md — Groq model selection, rate limits, when to use each model
+docs/setup.md — Installation, Docker setup, environment variables, first-run verification
+
+# Operational docs
+docs/troubleshooting.md — Error → cause → fix resolution table
+docs/runbooks/ingestion.md — How to add new data sources
+docs/runbooks/graph-update.md — How to update the knowledge graph incrementally
+
+# Decision records
+docs/adr/0001-llm-selection.md — Why Groq + local embeddings over alternatives
+docs/adr/0002-graph-db.md — Why Neo4j Community over other graph databases
+docs/adr/0003-agent-framework.md — Why LangGraph over other agent frameworks
+
+# Model cards
+docs/model-cards/llama-3.3-70b.md — Groq Llama 3.3 70B model card
+docs/model-cards/llama-3.1-8b.md — Groq Llama 3.1 8B model card
+docs/model-cards/minilm-l6.md — sentence-transformers all-MiniLM-L6-v2 model card
+
+# AI suggestion system
+docs/AI_SUGGESTIONS.md — Template for AI-submitted improvement suggestions
+.github/ISSUE_TEMPLATE/ai-suggestion.md — GitHub issue template for AI suggestions
