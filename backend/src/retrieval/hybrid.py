@@ -17,6 +17,7 @@ from typing import Optional
 
 from backend.src.retrieval.vector_store import get_vector_store
 from backend.src.graph.neo4j_client import get_neo4j_client
+from backend.src.agents.gnn_reasoner import GNNReasoner
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class HybridRetriever:
         self.top_k = top_k
         self._vector_store = get_vector_store()
         self._neo4j = get_neo4j_client()
+        self._gnn = GNNReasoner()
+        # Train once lazily if not mock mode
+        if not self._gnn._mock_mode:
+            self._gnn.train()
 
     def retrieve(self, query: str) -> list[RetrievalResult]:
         """Retrieve relevant context for a query from both sources.
@@ -151,6 +156,15 @@ class HybridRetriever:
                             f"  - {n.get('relationship', '?')} -> "
                             f"{n.get('target', '?')} ({n.get('target_type', '?')})"
                         )
+
+                    # Use GNN to infer potential relationships between this entity and other seen entities
+                    for other_entity in seen_entities:
+                        if other_entity != name.lower():
+                            prob = self._gnn.predict_link(name, other_entity)
+                            if prob > 0.8:
+                                context_parts.append(
+                                    f"  - [INFERRED_BY_GNN (prob={prob:.2f})] -> {other_entity}"
+                                )
 
                     results.append(
                         RetrievalResult(
